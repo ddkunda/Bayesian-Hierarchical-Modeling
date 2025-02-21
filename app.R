@@ -1,15 +1,14 @@
+# app.R
 library(shiny)
-library(cmdstanr)
+library(StanHeaders)
 library(ggplot2)
 library(parallel)
-library(posterior)
-library(polished)
-library(httr)
+library(rstan)  
+
+options(mc.cores = parallel::detectCores())
+rstan_options(auto_write = TRUE)
 
 
-# --- Global Code (runs once at startup) ---
-
-# Define the Stan model code
 stan_code <- "
 data {
   int<lower=0> N_drug;
@@ -43,20 +42,22 @@ model {
 }
 "
 
+# Compile the Stan model once globally
+stan_model_obj <- stan_model(model_code = stan_code)
 
-#cmdstanr::install_cmdstan()
-# cmdstanr::set_cmdstan_path("/Users/chris/.cmdstan/cmdstan-2.36.0")
-# cmdstanr::cmdstan_version()
+# my_model <- stan_model(file = "../Bayesian_Hierarchical_Modeling/MyStanPkg1/inst/stan/my_stan_model1.stan")
+# 
+# saveRDS(my_model, file = "my_model_compiled.rds")
+# 
+# # Adjust the filename as needed for your OS (".so" vs ".dll")
+# dyn.load("my_model.so")  
+# my_model <- readRDS("my_model_compiled.rds")
 
-# Write the Stan model to a file and compile it
-stan_file <- write_stan_file(stan_code)
-cmdstan_model_obj <- cmdstan_model(stan_file)
-
-# --- End Global Code ---
-
-# UI definition
+# --------------------------------------------------------------------------
+# UI
+# --------------------------------------------------------------------------
 ui <- fluidPage(
-  titlePanel("Bayesian Hierarchical Modeling: (Drug X vs Placebo)"),
+  titlePanel("Bayesian Hierarchical Model (Drug X vs Placebo)"),
   sidebarLayout(
     sidebarPanel(
       h4("1. Input Priors (e.g., percent reduction)"),
@@ -85,35 +86,36 @@ ui <- fluidPage(
       h3("Results"),
       verbatimTextOutput("summaryOutput"),
       plotOutput("posteriorPlot"),
-      br(), br(), br(), br(), br(), br(), br(), br(),
-      
-      h5(
-        span("All questions can be sent to Christian Dide-Agossou, PhD:", style = "color:black; display: inline-block;"),
-        span(htmlOutput("uicmt14"), style = "display: inline-block;")
-      )
+      br(), br(), br(), br(), br(), br(), br(), br(), br(), br(), br(), br(), br(), br(),
+      span(h5(textOutput("uicmt14")), style="color:red")
     )
   )
 )
 
-# SERVER definition
+# --------------------------------------------------------------------------
+# SERVER
+# --------------------------------------------------------------------------
 server <- function(input, output, session) {
   
+  # Load your pre-compiled model from RDS
+  
   runBayes <- eventReactive(input$runAnalysis, {
+    
     # Convert text input into numeric vectors
     drug_vals <- suppressWarnings(as.numeric(unlist(strsplit(input$drug_data, "[,\\s]+"))))
     placebo_vals <- suppressWarnings(as.numeric(unlist(strsplit(input$placebo_data, "[,\\s]+"))))
     
-    # Remove NA values
+    # Remove NA values (caused by bad formatting)
     drug_vals <- na.omit(drug_vals)
     placebo_vals <- na.omit(placebo_vals)
     
-    # Validate that we have at least 2 data points per group
+    # Ensure at least 2 data points exist in each group
     if (length(drug_vals) < 2 || length(placebo_vals) < 2) {
       showNotification("Error: Please enter at least two values for each group.", type = "error")
       return(NULL)
     }
     
-    # Build the data list for Stan – ensure names match those in the Stan model
+    # Build the data list for Stan – make sure these names match your Stan model data block!
     stan_data_list <- list(
       N_drug = length(drug_vals),
       drug_x_data = drug_vals,
@@ -126,44 +128,35 @@ server <- function(input, output, session) {
       prior_sigma_scale = input$prior_sigma_scale
     )
     
-    # Run sampling using cmdstanr's model object from the global environment.
-    # Suppress progress output by setting refresh = 0.
-    fit <- cmdstan_model_obj$sample(
-      data = stan_data_list,
+    # Run Stan sampling using the precompiled model from MyStanPkg1.
+    # This calls your package function that internally uses the compiled Stan model.
+    # 3. Fit with Stan
+    fit <- sampling(
+      object = stan_model_obj,
+      data   = stan_data_list,
+      iter   = 1000,
+      warmup = 500,
       chains = 4,
-      iter_warmup = 1000,
-      iter_sampling = 2000,  # Total iterations = 3000 (1000 warmup + 2000 sampling)
-      seed = 42,
-      adapt_delta = 0.95,
-      max_treedepth = 15,
-      refresh = 0      # Disables progress output
+      seed   = 42,
+      control = list(adapt_delta = 0.95, max_treedepth = 15)
     )
     
     return(fit)
   })
   
-  # Output summary of the posterior samples
+  # Output summary
   output$summaryOutput <- renderPrint({
+    req(runBayes())  # Ensure results exist before running
+    
     fit <- runBayes()
-    req(fit)
-    
-    # Convert draws to a tibble for easier manipulation using the posterior package
-    library(posterior)
-    draws <- as_draws_df(fit$draws())
-    
-    # Check that the required parameters are present
-    if (!("mu_drug" %in% names(draws)) || !("mu_placebo" %in% names(draws))) {
-      stop("Columns 'mu_drug' or 'mu_placebo' not found in the draws.")
-    }
-    
-    # Compute the difference between mu_drug and mu_placebo
-    drug_minus_placebo <- draws$mu_drug - draws$mu_placebo
+    posterior_samples <- extract(fit)
+    drug_minus_placebo <- posterior_samples$mu_drug - posterior_samples$mu_placebo
     threshold <- input$threshold
+    
     prob_effective <- mean(drug_minus_placebo > threshold)
     
-    # Print summary for key parameters using cmdstanr's built-in summary
     cat("Posterior Summary:\n")
-    print(fit$summary(c("mu_drug", "mu_placebo", "sigma")))
+    print(summary(fit, probs = c(0.025, 0.5, 0.975))$summary)
     
     cat("\n-----------------------------------------------------------\n")
     cat(sprintf("Probability(Drug X - Placebo > %0.2f) = %1.2f%%\n",
@@ -172,48 +165,35 @@ server <- function(input, output, session) {
   
   # Posterior Plot
   output$posteriorPlot <- renderPlot({
+    req(runBayes())
+    
     fit <- runBayes()
-    req(fit)
+    posterior_samples <- extract(fit)
     
-    # Convert draws to a tibble
-    library(posterior)
-    draws <- as_draws_df(fit$draws())
-    
-    # Check that required columns exist
-    if (!("mu_drug" %in% names(draws)) || !("mu_placebo" %in% names(draws))) {
-      stop("Columns 'mu_drug' or 'mu_placebo' not found in the draws.")
-    }
-    
-    # Compute the difference between mu_drug and mu_placebo
-    draws$mu_diff <- draws$mu_drug - draws$mu_placebo
-    
-    # Use the number of draws (rows) for plotting
-    n_draws <- nrow(draws)
-    
-    # Build a combined data frame for plotting densities
     df_all <- data.frame(
-      value = c(draws$mu_drug, draws$mu_placebo, draws$mu_diff),
-      group = rep(c("mu_drug", "mu_placebo", "mu_drug - mu_placebo"), each = n_draws)
+      value = c(
+        posterior_samples$mu_drug, 
+        posterior_samples$mu_placebo, 
+        posterior_samples$mu_drug - posterior_samples$mu_placebo
+      ),
+      group = rep(
+        c("mu_drug", "mu_placebo", "mu_drug - mu_placebo"), 
+        each = length(posterior_samples$mu_drug)
+      )
     )
     
-    # Create the density plot using ggplot2
     ggplot(df_all, aes(x = value, fill = group)) +
       geom_density(alpha = 0.4) +
       facet_wrap(~ group, scales = "free") +
       theme_minimal() +
-      xlab("Posterior Estimate") +
-      ylab("Density") +
+      xlab("Posterior Estimate") + ylab("Density") +
       ggtitle("Posterior Distributions")
   })
   
-  output$uicmt14 <- renderUI({
-    email <- "christian.dideagossou@gmail.com"
-    link <- paste0("mailto:", email)
-    tags$a(href = link, email)  # Use tags$a to create the hyperlink
+  output$uicmt14 <- renderText({
+    "Any question can be sent to Christian Dide-Agossou, PhD: christian.dideagossou@gmail.com"
   })
   
 }
 
-# Launch the app
 shinyApp(ui = ui, server = server)
-
