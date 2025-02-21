@@ -4,6 +4,7 @@ library(StanHeaders)
 library(ggplot2)
 library(parallel)
 library(rstan)  
+library(posterior)
 
 options(mc.cores = parallel::detectCores())
 rstan_options(auto_write = TRUE)
