@@ -9,3 +9,13 @@ install_if_missing = function(p) {
   }
 }
 invisible(sapply(my_packages, install_if_missing))
+
+
+Sys.setenv(MAKEFLAGS = "-j2")  # Speed up compilation
+Sys.setenv(R_MAKEVARS_USER = "~/.R/Makevars")
+
+# Create .R/Makevars if it doesn’t exist
+makevars_path <- file.path(Sys.getenv("HOME"), ".R", "Makevars")
+if (!file.exists(makevars_path)) {
+  writeLines("CXX17 = g++", makevars_path)
+}
